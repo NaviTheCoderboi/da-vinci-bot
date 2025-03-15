@@ -1,4 +1,4 @@
-export const PREFIX = '$';
+export const PREFIX = '%';
 
 export const EMOJIS = {
     pin: '📌',
