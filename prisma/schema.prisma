@@ -12,11 +12,9 @@ datasource db {
 
 model Bookmark {
   id         Int      @id @default(autoincrement())
-  title      String
+  tag        String
   content    String
   messageUrl String
   userId     String
-  tags       Json
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
 }

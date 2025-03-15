@@ -36,4 +36,4 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 prisma/*.db
 prisma/*.db-shm
 prisma/*.db-wal
-prisma/*.journal
+prisma/*.db-journal

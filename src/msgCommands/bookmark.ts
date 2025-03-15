@@ -1,128 +1,137 @@
-import type { APIEmbedField } from 'discord.js';
+import type { EmbedBuilder, APIEmbedField, Message } from 'discord.js';
 import MessageCommand from '../lib/base/MessageCommand';
 import { EMOJIS } from '../lib/constants';
 import prisma from '../lib/db';
 import { createEmbed } from '../lib/embed';
 import { getRepliedMessage } from '../lib/utilities/message';
 import { paginationEmbed } from '../lib/utilities/pagination';
+import { getDeleteButton } from '../lib/utilities/buttons';
+
+const bmCreateRegex =
+    /^([^,]+)(?:,\s*(https:\/\/discord\.com\/channels\/(?:@me|\d+)\/\d+\/\d+))?$/;
+
+const urlRegex =
+    /https:\/\/discord\.com\/channels\/(@me|[0-9]+)\/([0-9]+)\/([0-9]+)/;
+
+const getMsg = async (messageUrl: string) => {
+    const [_, guildId, channelId, messageId] = urlRegex.exec(messageUrl)!;
+
+    if (!guildId || !channelId || !messageId) return null;
+
+    const channel = client.channels.cache.get(channelId);
+    if (!channel) return null;
+
+    if (!channel.isTextBased()) return null;
+
+    const message = await channel.messages.fetch(messageId);
+    if (!message) return null;
+
+    return message;
+};
+
+export const getBookmarkContent = (message: Message) => {
+    const cnt = message.content;
+
+    if (cnt.length > 0) return cnt;
+
+    const embeds = message.embeds ?? [];
+
+    return embeds.reduce((acc, embed) => {
+        let _acc = acc;
+        if (embed.description) _acc += `${embed.description}\n`;
+        if (embed.fields) {
+            for (const field of embed.fields) {
+                _acc += `${field.name}\n${field.value}\n`;
+            }
+        }
+
+        return _acc;
+    }, '');
+};
+
+const queryRegex = /^([^,]+)(?:,\s*(tag|content))?$/;
 
 export const commands = [
     new MessageCommand({
-        name: 'boomark-create',
+        name: 'bookmark-create',
         description: 'Create a bookmark',
-        aliases: ['bookmark-create', 'bookmark-add', 'bc', 'bmcr'],
-        help: 'bookmark-create <title>, <message-id?>, <tags?> or bookmark-create <title>, <tags?>, <message-id?>',
+        aliases: ['bookmark-add', 'bc', 'bmcr'],
+        help: 'bookmark-create <tag>, <message-url?>',
         execute: async (message, args) => {
             try {
-                const argsRegex =
-                    /^([^,]+)(?:,\s*([0-9]+|[^,0-9][^,]*(?:;\s*[^,;]+)*|[^,0-9][^,]*(?:;[^,;]+)*))?,?\s*([0-9]+|[^,0-9][^,]*(?:;\s*[^,;]+)*|[^,0-9][^,]*(?:;[^,;]+)*)?$/;
-                const match = argsRegex.exec(args.join(' '));
+                const [_, tag, messageUrl] =
+                    args.join(' ').match(bmCreateRegex) ?? [];
 
-                if (!match) {
+                if (!tag) {
                     return await message.reply({
                         embeds: [
                             createEmbed('error', message.author)
-                                .setTitle('Invalid arguments')
+                                .setTitle('Invalid Arguments')
+                                .setDescription('Please provide a tag')
+                        ]
+                    });
+                }
+
+                const msg =
+                    (await getRepliedMessage(message)) ??
+                    (messageUrl ? await getMsg(messageUrl) : null);
+
+                if (!msg) {
+                    return await message.reply({
+                        embeds: [
+                            createEmbed('error', message.author)
+                                .setTitle('Invalid Arguments')
                                 .setDescription(
-                                    'Please provide the title of the bookmark and optionally a message id and tags. Format is `<title>, <message-id?>, <tags?>` or `<title>, <tags?>, <message-id?>`. Tags are in format `tag1; tag2; tag3` or `tag1;tag2;tag3`. For example: \n - `bookmark-create My bookmark, 123456789012345678, tag1; tag2`.'
+                                    'You need to reply to a message or provide a message URL to add bookmark'
                                 )
                         ]
                     });
                 }
 
-                const title = match[1]?.trim();
+                const content = getBookmarkContent(msg);
 
-                if (!title) {
+                if (content.length === 0) {
                     return await message.reply({
                         embeds: [
                             createEmbed('error', message.author)
-                                .setTitle('Invalid arguments')
+                                .setTitle('Invalid Arguments')
                                 .setDescription(
-                                    'Please provide the title of the bookmark.'
+                                    'The message to be bookmarked is empty'
                                 )
                         ]
                     });
                 }
 
-                let tags = null;
-                let messageId = null;
-
-                const part2 = match[2] ? match[2].trim() : null;
-                const part3 = match[3] ? match[3].trim() : null;
-
-                const isMessageId = (str: string) => str && /^\d+$/.test(str);
-                const isTags = (str: string) =>
-                    str && (str.includes(';') || !/^\d+$/.test(str));
-
-                if (part2 && isMessageId(part2)) {
-                    messageId = part2;
-                    if (part3 && isTags(part3)) {
-                        tags = part3;
-                    }
-                } else if (part2 && isTags(part2)) {
-                    tags = part2;
-                    if (part3 && isMessageId(part3)) {
-                        messageId = part3;
-                    }
-                } else if (part3 && isMessageId(part3)) {
-                    messageId = part3;
-                } else if (part3 && isTags(part3)) {
-                    tags = part3;
-                }
-
-                const tagArray = tags
-                    ? tags.split(/;\s*/).filter((tag) => tag.length > 0)
-                    : [];
-
-                const _repliedMessage = await getRepliedMessage(message);
-
-                const repliedMessageOrMessageIDProvided =
-                    _repliedMessage ?? messageId;
-
-                if (!repliedMessageOrMessageIDProvided) {
-                    return await message.reply({
-                        embeds: [
-                            createEmbed('error', message.author)
-                                .setTitle('No message to bookmark')
-                                .setDescription(
-                                    'You need to reply to a message to bookmark it. If you want to bookmark a message by id, please provide the message id.'
-                                )
-                        ]
-                    });
-                }
-
-                const repliedMessage =
-                    _repliedMessage ??
-                    // @ts-ignore
-                    (await message.channel.messages.fetch(messageId));
-
-                const content =
-                    repliedMessage.content.length === 0
-                        ? repliedMessage.embeds.length > 0
-                            ? (repliedMessage.embeds[0]?.description ?? null)
-                            : null
-                        : repliedMessage.content;
-
-                if (!content || content.length === 0) {
-                    return await message.reply({
-                        embeds: [
-                            createEmbed('error', message.author)
-                                .setTitle('No content to bookmark')
-                                .setDescription(
-                                    'The message you are trying to bookmark has no content or embed description.'
-                                )
-                        ]
-                    });
-                }
+                const deleteButtons = getDeleteButton(message.author);
 
                 await prisma.bookmark.create({
                     data: {
-                        title,
-                        messageUrl: repliedMessage.url,
+                        tag: tag.trim(),
                         content: content,
-                        tags: tagArray ?? [],
+                        messageUrl: msg.url,
                         userId: message.author.id
                     }
+                });
+
+                await message.author.send({
+                    embeds: [
+                        createEmbed('info', message.author)
+                            .setTitle('Bookmark Created')
+                            .setDescription('Bookmark created successfully')
+                            .addFields({
+                                name: 'Tag',
+                                value: tag.trim()
+                            })
+                            .addFields({
+                                name: 'Content',
+                                value: content
+                            })
+                            .addFields({
+                                name: 'Message URL',
+                                value: msg.url
+                            })
+                    ],
+                    components: [deleteButtons]
                 });
 
                 await message.react(EMOJIS.bookmark);
@@ -130,9 +139,9 @@ export const commands = [
                 await message.reply({
                     embeds: [
                         createEmbed('error', message.author)
-                            .setTitle('Error creating bookmark')
+                            .setTitle('Error')
                             .setDescription(
-                                'An error occurred while creating the bookmark.'
+                                'An error occurred while creating the bookmark'
                             )
                     ]
                 });
@@ -143,22 +152,21 @@ export const commands = [
     new MessageCommand({
         name: 'bookmark-list',
         description: 'List all bookmarks',
-        aliases: ['bookmark-list', 'bookmark-ls', 'bls'],
-        help: 'bookmark-list <query?>',
+        aliases: ['bookmark-ls', 'bls'],
+        help: 'bookmark-list <id> | <tag>',
         execute: async (message, args) => {
             try {
-                const query = args.join(' ');
-                const hasQuery = query.length > 0;
+                const idOrTag = args.join(' ');
+
+                const isID = /^\d+$/.test(idOrTag);
 
                 const bookmarks = await prisma.bookmark.findMany({
                     where: {
                         userId: message.author.id,
-                        ...(hasQuery
-                            ? {
-                                  title: {
-                                      contains: query
-                                  }
-                              }
+                        ...(idOrTag.length > 0
+                            ? isID
+                                ? { id: Number.parseInt(idOrTag) }
+                                : { tag: idOrTag }
                             : {})
                     }
                 });
@@ -167,30 +175,28 @@ export const commands = [
                     return await message.reply({
                         embeds: [
                             createEmbed('info', message.author)
-                                .setTitle('No bookmarks')
-                                .setDescription('You have no bookmarks.')
+                                .setTitle('No Bookmarks Found')
+                                .setDescription(
+                                    'No bookmarks found with the provided ID or tag'
+                                )
                         ]
                     });
                 }
 
-                const formattedTags = (tags: string[]) => {
-                    return tags.length > 0
-                        ? `\`${tags.join(', ')}\``
-                        : 'No tags';
-                };
+                const embeds: EmbedBuilder[] = [];
 
                 const fields: APIEmbedField[] = bookmarks.map((bookmark) => ({
-                    name: `(${bookmark.id}) ${bookmark.title} - ${bookmark.messageUrl}`,
-                    value: `${bookmark.content}\n\n\`${formattedTags(bookmark.tags as any)}\``,
-                    inline: false
+                    name: `ID: ${bookmark.id} | Tag: ${bookmark.tag}`,
+                    value: `${bookmark.content}\n[Jump to message](${bookmark.messageUrl})`
                 }));
 
                 const pageSize = 4;
-                const embeds = [];
+
                 for (let i = 0; i < fields.length; i += pageSize) {
                     const embed = createEmbed('info', message.author)
                         .setTitle('Bookmarks')
                         .addFields(fields.slice(i, i + pageSize));
+
                     embeds.push(embed);
                 }
 
@@ -199,9 +205,81 @@ export const commands = [
                 await message.reply({
                     embeds: [
                         createEmbed('error', message.author)
-                            .setTitle('Error listing bookmarks')
+                            .setTitle('Error')
                             .setDescription(
-                                'An error occurred while listing the bookmarks.'
+                                'An error occurred while listing the bookmarks'
+                            )
+                    ]
+                });
+                throw error;
+            }
+        }
+    }),
+    new MessageCommand({
+        name: 'bookmark-query',
+        description: 'Query bookmarks by a search string',
+        aliases: ['bookmark-query', 'bq'],
+        help: 'bookmark-query <query>, <type>',
+        execute: async (message, args) => {
+            try {
+                const [_, query, type] = args.join(' ').match(queryRegex) ?? [];
+
+                if (!query) {
+                    return await message.reply({
+                        embeds: [
+                            createEmbed('error', message.author)
+                                .setTitle('Invalid Arguments')
+                                .setDescription('Please provide a query')
+                        ]
+                    });
+                }
+
+                const bookmarks = await prisma.bookmark.findMany({
+                    where: {
+                        userId: message.author.id,
+                        [type === 'tag' ? 'tag' : 'content']: {
+                            contains: query
+                        }
+                    }
+                });
+
+                if (bookmarks.length === 0) {
+                    return await message.reply({
+                        embeds: [
+                            createEmbed('info', message.author)
+                                .setTitle('No Bookmarks Found')
+                                .setDescription(
+                                    'No bookmarks found with the provided ID or tag'
+                                )
+                        ]
+                    });
+                }
+
+                const embeds: EmbedBuilder[] = [];
+
+                const fields: APIEmbedField[] = bookmarks.map((bookmark) => ({
+                    name: `ID: ${bookmark.id} | Tag: ${bookmark.tag}`,
+                    value: `${bookmark.content}\n[Jump to message](${bookmark.messageUrl})`
+                }));
+
+                const pageSize = 4;
+
+                for (let i = 0; i < fields.length; i += pageSize) {
+                    const embed = createEmbed('info', message.author)
+                        .setTitle('Bookmarks')
+                        .addFields(fields.slice(i, i + pageSize));
+
+                    embeds.push(embed);
+                }
+
+                await paginationEmbed(message, embeds);
+            } catch (error) {
+                await message.reply({
+                    embeds: [
+                        createEmbed('error', message.author)
+                            .setTitle('Error')
+                            .setDescription(
+                                'An error occurred while querying the bookmarks'
                             )
                     ]
                 });
@@ -212,27 +290,35 @@ export const commands = [
     new MessageCommand({
         name: 'bookmark-delete',
         description: 'Delete a bookmark',
-        aliases: ['bookmark-delete', 'bookmark-del', 'bd', 'bmdel'],
+        aliases: ['bookmark-del', 'bd'],
         help: 'bookmark-delete <id>',
         execute: async (message, args) => {
             try {
-                const bookmarkId = args[0];
-
-                if (!bookmarkId || !/^\d+$/.test(bookmarkId)) {
+                if (args.length === 0) {
                     return await message.reply({
                         embeds: [
                             createEmbed('error', message.author)
-                                .setTitle('Invalid arguments')
-                                .setDescription(
-                                    'Please provide the id of the bookmark to delete.'
-                                )
+                                .setTitle('Invalid Arguments')
+                                .setDescription('Please provide an ID')
+                        ]
+                    });
+                }
+
+                const id = Number.parseInt(args[0]!);
+
+                if (Number.isNaN(id)) {
+                    return await message.reply({
+                        embeds: [
+                            createEmbed('error', message.author)
+                                .setTitle('Invalid Arguments')
+                                .setDescription('Please provide a valid ID')
                         ]
                     });
                 }
 
                 const bookmark = await prisma.bookmark.findFirst({
                     where: {
-                        id: Number.parseInt(bookmarkId),
+                        id,
                         userId: message.author.id
                     }
                 });
@@ -241,9 +327,9 @@ export const commands = [
                     return await message.reply({
                         embeds: [
                             createEmbed('error', message.author)
-                                .setTitle('Bookmark not found')
+                                .setTitle('Invalid Arguments')
                                 .setDescription(
-                                    'The bookmark with the provided id was not found.'
+                                    'No bookmark found with the provided ID'
                                 )
                         ]
                     });
@@ -251,7 +337,8 @@ export const commands = [
 
                 await prisma.bookmark.delete({
                     where: {
-                        id: Number.parseInt(bookmarkId)
+                        id,
+                        userId: message.author.id
                     }
                 });
 
@@ -260,9 +347,9 @@ export const commands = [
                 await message.reply({
                     embeds: [
                         createEmbed('error', message.author)
-                            .setTitle('Error deleting bookmark')
+                            .setTitle('Error')
                             .setDescription(
-                                'An error occurred while deleting the bookmark.'
+                                'An error occurred while deleting the bookmark'
                             )
                     ]
                 });
